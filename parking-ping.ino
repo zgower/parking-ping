@@ -5,25 +5,25 @@
 #define TRIGGER_PIN  8
 #define ECHO_PIN     9
 #define MAX_DISTANCE 255 // Maximum distance we want to measure (in centimeters).
+#define MIN_DISTANCE 5
 #define BUTTON_PIN   7
 #define LED_PIN      11
 
 int address = 0, //eeprom address to read/write
-    distance, 
-    lastDistance,
+    distance, //distance gathered from ping
+    prevDistance, //previous distance to compare changes with
     saveDistance, //saved distance to compare to
-    minDistance = 5, //minimum distance from device
-    distanceCount = 0,
-    buttonState, 
-    prevButton, 
-    sonarPing = 20,
-    btnCount = 0, //how long button is down
+    idleCount = 0, //counter for moving to idle state
+    buttonCount = 0, //counter for how long button is held down
+    buttonState, //for holding current state of the button
+    prevButton, //previous button state to compare if change
+    sonarPing = 20, //how many pings
     maxCount = 30, //how many queries for learn
     delayCount = 29, //how long to delay between query
     learnDelay = 1500, //how long to hold button for 
     degOfError = 10,
-    learnAvg = 0,
-    brightness = 0;
+    learnAvg = 0, //
+    brightness = 0; //brightness scale (0-255) for controlling LED
 
 bool dim = false;
 
@@ -32,6 +32,7 @@ enum STATE {
   IDLE,
   LEARN
 };
+
 enum STATE currentState = RUN;
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE); // NewPing setup of pins and maximum distance.
 
@@ -42,10 +43,12 @@ void setup() {
   digitalWrite(LED_PIN, HIGH);
   //load from eeprom here
   saveDistance = EEPROM.read(address);
-  Serial.print(millis());
-  Serial.print(": ");
-  Serial.print("Learned Distance: ");
-  Serial.println(saveDistance);
+  if(Serial){
+    Serial.print(millis());
+    Serial.print(": ");
+    Serial.print("Learned Distance: ");
+    Serial.println(saveDistance);
+  }
 }
 
 void loop() {
@@ -56,64 +59,125 @@ void loop() {
     distance = sonar.convert_cm(distance);
   }
   switch(currentState){
-    case 0:
+    case RUN:
       //running state
       if(buttonState == HIGH){
         //start count
         if(prevButton == LOW){
           digitalWrite(LED_PIN, LOW);
         }else{
-          btnCount++;
+          buttonCount++;
+          idleCount = 0;
+          if(Serial){
+            Serial.print("Button Down: ");
+            Serial.println(idleCount);
+          }
           delay(5);
         }
-        if(btnCount >= learnDelay){
-          btnCount = 0;
-          digitalWrite(LED_PIN, HIGH);
-          Serial.print(millis());
-          Serial.print(": ");
-          Serial.println("Moving to Learn from Run");
+        if(buttonCount >= learnDelay){
+          buttonCount = 0;
+          idleCount = 0;
           currentState = LEARN;
+          digitalWrite(LED_PIN, HIGH);
+          if(Serial){
+            Serial.print(millis());
+            Serial.print(": ");
+            Serial.println("Moving to Learn from Run");
+          }
           delay(1000);
         }
       }else{
         //check distance
         if(prevButton == HIGH){
-          btnCount = 0;
+          buttonCount = 0;
           digitalWrite(LED_PIN, HIGH);
         }
         if(distance != 0){
           if(distance <= saveDistance){
             //do stuff if within range
-            Serial.println("Within Range!");
+            if(Serial){
+              Serial.print("Distance: ");
+              Serial.print(distance);
+              Serial.print("cm | ");
+              Serial.println("Within Range!");
+            }
+          }else{
+            if(Serial){
+              Serial.print("Distance: ");
+              Serial.print(distance);
+              Serial.println("cm");
+            }
           }
         }
-        if(lastDistance >= (distance - 1) && lastDistance <= (distance + 1)){
-          Serial.print("Same Same ");
-          Serial.print(distanceCount);
-          Serial.print(" : ");
-          Serial.print(distance);
-          Serial.println("cm");
-          distanceCount++;
+        //check if nothing is happening and move to idle, 
+        if(prevDistance >= (distance - 1) && prevDistance <= (distance + 1)){
+          idleCount++;
+          if(Serial){
+            Serial.print("Idle Counting: ");
+            Serial.println(idleCount);
+          }
           delay(5);
         }else{
-          distanceCount = 0;
+          idleCount = 0;
         }
-        if(distanceCount >= 100){
-          distanceCount = 0;
-          Serial.print(millis());
-          Serial.print(": ");
-          Serial.println("Moving to Idle from Run");
+        if(idleCount >= 100){
+          idleCount = 0;
           currentState = IDLE;
+          if(Serial){
+            Serial.print(millis());
+            Serial.print(": ");
+            Serial.println("Moving to Idle from Run");
+          }
         }
       }
       break;
-    case 1:
+    case LEARN:
+      //learning state
+      if(buttonState == LOW){
+        if(buttonCount <= maxCount){
+          digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+          if(abs(prevDistance - distance) <= degOfError){
+            learnAvg += distance;
+          }
+          buttonCount++;
+        }else{
+          //save to eeprom here
+          learnAvg = learnAvg / maxCount;
+          if(learnAvg > MAX_DISTANCE){
+            learnAvg = MAX_DISTANCE;
+          }else if(learnAvg < MIN_DISTANCE){
+            learnAvg = MIN_DISTANCE;
+          }
+          EEPROM.update(address, learnAvg);
+          saveDistance = learnAvg;
+          learnAvg = 0;
+          buttonCount = 0;
+          currentState = RUN;
+          digitalWrite(LED_PIN, HIGH);
+          if(Serial){
+            Serial.print("Learned Distance: ");
+            Serial.println(saveDistance);
+            Serial.print(millis());
+            Serial.print(": ");
+            Serial.println("Moving to Run from Learn");
+          }
+        }
+      }else{
+        if(Serial){
+          currentState = RUN;
+          digitalWrite(LED_PIN, HIGH);
+          Serial.println("Cancel Learn");
+          Serial.println("Moving to Run from Learn");
+        }
+      }
+      break;
+    case IDLE:
       //idle state
       //disable any lights
-      int bright = 1;
+      int bright = 2;
       do{
         analogWrite(LED_PIN, brightness);
-        delay(8);
+        delay(6);
         if(dim){
           brightness -= bright;
         }else{
@@ -128,49 +192,28 @@ void loop() {
           digitalWrite(LED_PIN, LOW);
         }
       }while(brightness > 0);
-      
-      if(lastDistance <= (distance - 1) || lastDistance >= (distance + 1)){
-        digitalWrite(LED_PIN, HIGH);
-        Serial.print(millis());
-        Serial.print(": ");
-        Serial.println("Moving to Run from Idle");
+      if(buttonState == HIGH){
+        digitalWrite(LED_PIN, LOW);
         currentState = RUN;
-      }
-      break;
-    case 2:
-      //learning state
-      if(prevButton != HIGH && buttonState != HIGH){
-        if(btnCount <= maxCount){
-          digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-          if(abs(lastDistance - distance) <= degOfError){
-            learnAvg += distance;
-          }
-          btnCount++;
-        }else{
-          btnCount = 0;
-          //save to eeprom here
-          learnAvg = learnAvg / maxCount;
-          if(learnAvg > 255){
-            learnAvg = 255;
-          }else if(learnAvg < minDistance){
-            learnAvg = minDistance;
-          }
-          EEPROM.update(address, learnAvg);
-          saveDistance = learnAvg;
-          learnAvg = 0;
-          digitalWrite(LED_PIN, HIGH);
-          Serial.print("Learned Distance: ");
-          Serial.println(saveDistance);
+        if(Serial){
           Serial.print(millis());
           Serial.print(": ");
-          Serial.println("Moving to Run from Learn");
-          currentState = RUN;
+          Serial.println("Moving to Run from Idle");
+        }
+      }
+      if(prevDistance <= (distance - 2) || prevDistance >= (distance + 2)){
+        digitalWrite(LED_PIN, HIGH);
+        currentState = RUN;
+        if(Serial){
+          Serial.print(millis());
+          Serial.print(": ");
+          Serial.println("Moving to Run from Idle");
         }
       }
       break;
     default:
-      currentState = IDLE;
+      currentState = RUN;
   }
-  lastDistance = distance;
+  prevDistance = distance;
   prevButton = buttonState;
 }
