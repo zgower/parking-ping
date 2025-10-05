@@ -48,6 +48,7 @@ void setup() {
     Serial.print(": ");
     Serial.print("Learned Distance: ");
     Serial.println(saveDistance);
+    learnDelay = learnDelay / 2;
   }
 }
 
@@ -69,8 +70,10 @@ void loop() {
           buttonCount++;
           idleCount = 0;
           if(Serial){
+            Serial.print(millis());
+            Serial.print(": ");
             Serial.print("Button Down: ");
-            Serial.println(idleCount);
+            Serial.println(buttonCount);
           }
           delay(5);
         }
@@ -96,6 +99,8 @@ void loop() {
           if(distance <= saveDistance){
             //do stuff if within range
             if(Serial){
+              Serial.print(millis());
+              Serial.print(": ");
               Serial.print("Distance: ");
               Serial.print(distance);
               Serial.print("cm | ");
@@ -103,6 +108,8 @@ void loop() {
             }
           }else{
             if(Serial){
+              Serial.print(millis());
+              Serial.print(": ");
               Serial.print("Distance: ");
               Serial.print(distance);
               Serial.println("cm");
@@ -113,6 +120,8 @@ void loop() {
         if(prevDistance >= (distance - 1) && prevDistance <= (distance + 1)){
           idleCount++;
           if(Serial){
+            Serial.print(millis());
+            Serial.print(": ");
             Serial.print("Idle Counting: ");
             Serial.println(idleCount);
           }
@@ -138,6 +147,13 @@ void loop() {
           digitalWrite(LED_PIN, !digitalRead(LED_PIN));
           if(abs(prevDistance - distance) <= degOfError){
             learnAvg += distance;
+            if(Serial){
+              Serial.print(millis());
+              Serial.print(": ");
+              Serial.print("Learn Distance: ");
+              Serial.print(distance);
+              Serial.println("cm");
+            }
           }
           buttonCount++;
         }else{
@@ -155,6 +171,8 @@ void loop() {
           currentState = RUN;
           digitalWrite(LED_PIN, HIGH);
           if(Serial){
+            Serial.print(millis());
+            Serial.print(": ");
             Serial.print("Learned Distance: ");
             Serial.println(saveDistance);
             Serial.print(millis());
@@ -209,6 +227,11 @@ void loop() {
           Serial.print(": ");
           Serial.println("Moving to Run from Idle");
         }
+      }
+      if(Serial){
+        Serial.print(millis());
+        Serial.print(": ");
+        Serial.println("Idling");
       }
       break;
     default:
