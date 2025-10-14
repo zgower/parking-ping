@@ -9,46 +9,51 @@
 #define ECHO_PIN      10
 #define LED_PIN       11
 
-const int max_distance = 600;
-const int min_distance = 5;
+const int max_distance = 600; //maximum distance for sensor(cm)
+const int min_distance = 5; //minimum distance for range detection(cm)
 
+const int address = 0, //address in eeprom to store distance information
+          median = 50, //extra distance to issue getting close warning
+          doeLearn = 5, //Degree Of Error for when learning, prevent wild values outside of range from getting added
+          doeIdle = 1; //Degree Of Error for when checking if nothing is happening, smaller values will make it trigger more often, too high and it will not trigger enough
+                       //when idle, will add one(1) to value to increase any diviation that may occur
+const unsigned int gotoLearn = 5, //time it will take to hold button to goto learn
+                   gotoIdle = 45, //time it will take to goto idle
+                   timeLearn = 15; //time it will spend learning distance before save
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, max_distance);
-
-volatile unsigned int distance;
-unsigned int prevDistance;
+volatile unsigned int distance; //distance learned by HC-SR04 ultrasonic sensor
+unsigned int prevDistance; //previous distance to track movement and direction
+unsigned long prevTime; //time used for counting
+int savedDistance, //saved distance, set during setup and updated when peforming LEARN
+    medianDistance, //median distance, aprox 50cm+savedDistance
+    runCount = 0, //counts how many times entered run state
+    idleCount = 0, //counts how many times entered idle state
+    learnCount = 0, //counts how many times entered learn state
+    buttonState, //current state of button
+    prevButtonState, //previous state of button
+    countLearn = 0, //counts how many times something gets added to avgLearn
+    avgLearn = 0; //adds all distance values during LEARN and is divided by countLearn to get average
+String logs = ""; //string to hold all log information and display at end
 unsigned int* pdistance = &distance;
-unsigned long prevTime, 
-              timeLearn = 15,
-              timeIdle = 45;
-int address = 0,
-    brightness = 0,
-    runCount = 0,
-    idleCount = 0,
-    learnCount = 0,
-    savedDistance,
-    medianDistance,
-    buttonState,
-    prevButtonState,
-    gotoLearn = 5,
-    countLearn = 0,
-    avgLearn = 0,
-    doeLearn = 5,
-    doeIdle = 1,
-    fadeAmount = 1;
-String logs = "";
-bool detectIdle = false;
 enum STATE {
-  RUN,
-  IDLE,
-  LEARN
+  RUN, //checks distance
+  IDLE, //lower actions, meant to disable any lights
+  LEARN //for learning new saved distance
 };
 enum RANGE {
-  GREEN,
+  GREEN, 
   YELLOW,
-  RED
+  RED,
+  DANGER
 };
-enum STATE currentState;
-enum RANGE currentRange;
+enum STATE currentState; //stores current state
+enum STATE previousState;
+enum RANGE currentRange; //stores current range state
+enum RANGE previousRange;
+
+void logger(String msg){
+  logs += (Serial) ? msg + " " : "";
+}
 
 pt ptSonar;
 int sonarThread(struct pt* pt){
@@ -85,13 +90,13 @@ int statusThread(struct pt* pt){
           digitalWrite(LED_PIN, HIGH);
         }
         break;
-      case IDLE:
-        analogWrite(LED_PIN, brightness);
-        break;
       case LEARN:
         if(buttonState == LOW){
           digitalWrite(LED_PIN, !digitalRead(LED_PIN));
         }
+        break;
+      case IDLE:
+        digitalWrite(LED_PIN, LOW);
         break;
       default:
         //digitalWrite(LED_PIN, HIGH);
@@ -112,10 +117,13 @@ int ledThread(struct pt* pt){
           //lights are green
           break;
         case YELLOW:
-          //lights are yellow/orange flashing
+          //lights are yellow/orange
           break;
         case RED:
           //lights are red
+          break;
+        case DANGER:
+          //lights are red flashing
           break;
         default:
           //lights are off
@@ -139,8 +147,8 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   prevTime = millis();
   savedDistance = EEPROM.read(address);
-  medianDistance = savedDistance + 50;
-  logs += (Serial) ? "| Saved Distance (" + String(savedDistance) + ") | Moving RUN" : "";
+  medianDistance = savedDistance+median;
+  logger("| Saved Distance (" + String(savedDistance) + ") | Moving RUN");
   runCount++;
   currentState = RUN;
 }
@@ -151,18 +159,20 @@ void loop() {
   PT_SCHEDULE(statusThread(&ptStatus));
   PT_SCHEDULE(ledThread(&ptLED));
   unsigned int d = *pdistance;
+  previousState = currentState;
+  previousRange = currentRange;
   switch(currentState){
     case RUN:
       if(buttonState == HIGH){
         if(prevButtonState == LOW){
           prevTime = millis();
         }
-        if(abs(millis() - prevTime) >= (gotoLearn * 1000)){
-          logs += (Serial) ? "| Moving RUN > LEARN (" + String(learnCount) + ") " : "";
+        unsigned long learn = abs(millis() - prevTime);
+        if(learn >= ((long)gotoLearn * 1000)){
           learnCount++;
           currentState = LEARN;
         }else{
-          logs += (Serial) ? "| Button (" + String(abs(millis() - prevTime)) + ") " : "";
+          logger("| Button Held (" + String((int)(learn * 0.001)) + ")");
         }
       }else{
         //detect range
@@ -172,25 +182,24 @@ void loop() {
         if(d != 0){
           if(d > medianDistance){
             currentRange = RED;
-            logs += (Serial) ? "| Out of range! " : "";
           }else if(d > savedDistance){
             currentRange = YELLOW;
-            logs += (Serial) ? "| Almost in range! " : "";
-          }else{
+          }else {
             currentRange = GREEN;
-            logs += (Serial) ? "| Within Range! " : "";
+            if(d <= min_distance){
+              currentRange = DANGER;
+            }
           }
         }else{
-          logs += (Serial) ? "| No Range " : "";
+          logger("| No Range");
         }
         //detect IDLE
         if(prevDistance >= (d - doeIdle) && prevDistance <= (d + doeIdle)){
-          unsigned long idle = millis() - prevTime; 
-          logs += (Serial) ? "| Idle Count (" + String(idle) + ") " : "";
-          if(idle >= timeIdle*1000){
-            logs += (Serial) ? "| Moving RUN > IDLE (" + String(idleCount) + ") " : "";
+          unsigned long idle = (millis() - prevTime); 
+          logger("| Idle Count (" + String((int)(idle * 0.001)) + ")");
+          if(idle >= ((long)gotoIdle * 1000)){
             idleCount++;
-            currentRange = NULL;
+            currentRange = -1;
             currentState = IDLE;
           }
         }else{
@@ -198,35 +207,16 @@ void loop() {
         }
       }
       break;
-    case IDLE:
-      bool exitIdle = false;
-      float delta = abs(millis() - prevTime) * 0.001;
-      brightness += fadeAmount;
-      logs += (Serial) ? "| I'm an idle(" + String(brightness) + ") " : "";
-      if(prevDistance <= (d - (doeIdle+1)) || prevDistance >= (d + (doeIdle+1))){
-        exitIdle = true;
-      }
-      if(buttonState == HIGH && prevButtonState == LOW){
-        exitIdle = true;
-      }
-      if(exitIdle){
-        logs += (Serial) ? " | Moving Idle > Run (" + String(runCount) + ") " : "";
-        runCount++;
-        currentState = RUN;
-      }
-      if(brightness <= 0 || brightness >= 255){
-        fadeAmount = -fadeAmount;
-      }
-      break;
     case LEARN:
       if(buttonState == LOW && prevButtonState == HIGH){
         prevTime = millis();
       }else if(buttonState == LOW && prevButtonState == LOW){
-        if(abs(millis() - prevTime) <= (timeLearn * 1000)){
+        unsigned long learn = abs(millis() - prevTime);
+        if(learn <= ((long)timeLearn*1000)){
           if(abs(prevDistance - d) <= doeLearn){
             avgLearn += d;
             countLearn++;
-            logs += (Serial) ? "| Learning (" + String(avgLearn / countLearn) + ") " : "";
+            logger("| Learning (" + String(avgLearn / countLearn) + ")");
           }
         }else{
           avgLearn = avgLearn / countLearn;
@@ -237,17 +227,30 @@ void loop() {
           }
           EEPROM.update(address, avgLearn);
           savedDistance = avgLearn;
-          medianDistance = savedDistance + 50;
+          medianDistance = savedDistance + median;
           avgLearn = 0;
           countLearn = 0;
-          logs += (Serial) ? "| Learned Distance (" + String(savedDistance) + ")| Moving LEARN > RUN (" + String(runCount) + ") " : "";
+          logger("| Learned Distance (" + String(savedDistance) + ")");
           runCount++;
           currentState = RUN;
         }
       }else if(buttonState == HIGH && prevButtonState == LOW){
-        logs += (Serial) ? "| Button/Moving LEARN > RUN (" + String(runCount) + ") " : "";
         runCount++;
         currentState = RUN;
+      }
+      break;
+    case IDLE:
+      bool exitIdle = false;
+      if(prevDistance < (d - (doeIdle+1)) || prevDistance > (d + (doeIdle+1))){
+        exitIdle = true;
+      }
+      if(buttonState == HIGH && prevButtonState == LOW){
+        exitIdle = true;
+      }
+      if(exitIdle){
+        runCount++;
+        currentState = RUN;
+        break;
       }
       break;
     default:
@@ -255,8 +258,44 @@ void loop() {
   }
   if(Serial){
     Serial.print(millis());
-    Serial.print(" | r/i/l=" + String(runCount) + "/" + String(idleCount) + "/" + String(learnCount) + " ");
-    Serial.print("| Distance: " + String(d) + "/" + String(savedDistance) + "cm ");
+    Serial.print("| State: ");
+    switch(currentState){
+      case RUN:
+        Serial.print("running  (" + String(runCount) +") ");
+        break;
+      case IDLE:
+        Serial.print("idling   (" + String(idleCount) + ") ");
+        break;
+      case LEARN:
+        Serial.print("learning (" + String(learnCount) + ") ");
+        break;
+      default:
+        Serial.print("no state");
+    }
+    Serial.print("| Range: ");
+    switch(currentRange){
+      case GREEN:
+        Serial.print("within range ");
+        break;
+      case YELLOW:
+        Serial.print("almost range ");
+        break;
+      case RED:
+        Serial.print("out of range ");
+        break;
+      case DANGER:
+        Serial.print("move back now");
+        break;
+      default:
+        Serial.print("no range");
+    }
+    Serial.print("(" + String(d) + "/" + String(savedDistance) + "cm) ");
+    if(previousState != currentState){
+      Serial.print("| State Change " + String(previousState) + " > " + String(currentState) + " ");
+    }
+    if(previousRange != currentRange && currentState != IDLE){
+      Serial.print("| Range Change " + String(previousRange) + " > " + String(currentRange) + " ");
+    }
     Serial.println(logs);
   }
   prevDistance = d;
