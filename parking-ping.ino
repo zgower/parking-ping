@@ -1,19 +1,31 @@
+/*
+Title: parking-ping
+Author: zgower
+*/
+
 #include <NewPing.h>
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <string.h>
 #include <protothreads.h>
+#include <FastLED.h>
 
-#define BUTTON_PIN    8
-#define TRIGGER_PIN   9
-#define ECHO_PIN      10
-#define LED_PIN       11
+#define BUTTON_PIN    15 
+#define TRIGGER_PIN   5
+#define ECHO_PIN      6
+#define STATUS_PIN    4
+#define RST_PIN       11
+#define LED_PIN       14
+#define NUM_LED       138 //total 138
 
 const int max_distance = 600; //maximum distance for sensor(cm)
 const int min_distance = 5; //minimum distance for range detection(cm)
+CRGB leds[NUM_LED];
 
 const int address = 0, //address in eeprom to store distance information
           median = 50, //extra distance to issue getting close warning
+          savedDistance = EEPROM.read(address), //saved distance, set during setup and updated when peforming LEARN
+          medianDistance = savedDistance + median, //median distance, aprox 50cm+savedDistance
           doeLearn = 5, //Degree Of Error for when learning, prevent wild values outside of range from getting added
           doeIdle = 1; //Degree Of Error for when checking if nothing is happening, smaller values will make it trigger more often, too high and it will not trigger enough
                        //when idle, will add one(1) to value to increase any diviation that may occur
@@ -23,10 +35,8 @@ const unsigned int gotoLearn = 5, //time it will take to hold button to goto lea
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, max_distance);
 volatile unsigned int distance; //distance learned by HC-SR04 ultrasonic sensor
 unsigned int prevDistance; //previous distance to track movement and direction
-unsigned long prevTime; //time used for counting
-int savedDistance, //saved distance, set during setup and updated when peforming LEARN
-    medianDistance, //median distance, aprox 50cm+savedDistance
-    runCount = 0, //counts how many times entered run state
+unsigned long prevTime, flashMillis; //time used for counting
+int runCount = 0, //counts how many times entered run state
     idleCount = 0, //counts how many times entered idle state
     learnCount = 0, //counts how many times entered learn state
     buttonState, //current state of button
@@ -34,6 +44,7 @@ int savedDistance, //saved distance, set during setup and updated when peforming
     countLearn = 0, //counts how many times something gets added to avgLearn
     avgLearn = 0; //adds all distance values during LEARN and is divided by countLearn to get average
 String logs = ""; //string to hold all log information and display at end
+bool rst = false;
 unsigned int* pdistance = &distance;
 enum STATE {
   RUN, //checks distance
@@ -59,7 +70,8 @@ pt ptSonar;
 int sonarThread(struct pt* pt){
   PT_BEGIN(pt);
   for(;;){
-    delay(29);
+    FastLED.clear(true); // this causes strobing effect everytime sensor is ran. Can be removed if power for sensor and LED is seperated
+    delay(50);
     distance = sonar.ping_median();
     distance = sonar.convert_cm(distance);
     PT_YIELD(pt);
@@ -85,21 +97,21 @@ int statusThread(struct pt* pt){
     switch(currentState){
       case RUN:
         if(buttonState == HIGH){
-          digitalWrite(LED_PIN, LOW);
+          digitalWrite(STATUS_PIN, LOW);
         }else{
-          digitalWrite(LED_PIN, HIGH);
+          digitalWrite(STATUS_PIN, HIGH);
         }
         break;
       case LEARN:
         if(buttonState == LOW){
-          digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+          digitalWrite(STATUS_PIN, !digitalRead(STATUS_PIN));
         }
         break;
       case IDLE:
-        digitalWrite(LED_PIN, LOW);
+        digitalWrite(STATUS_PIN, LOW);
         break;
       default:
-        //digitalWrite(LED_PIN, HIGH);
+        //digitalWrite(STATUS_PIN, HIGH);
         break;
     }
     PT_YIELD(pt);
@@ -111,43 +123,73 @@ pt ptLED;
 int ledThread(struct pt* pt){
   PT_BEGIN(pt);
   for(;;){
+    CRGB color = CRGB::White;
     if(currentState == RUN){
       switch(currentRange){
-        case GREEN:
-          //lights are green
-          break;
-        case YELLOW:
-          //lights are yellow/orange
+        case DANGER:
+          //lights are red flashing
+          if(abs(millis() - flashMillis) >= 500){
+            flashMillis = millis();
+            if(color == CRGB::Red){
+              color == CRGB(255, 255, 255);
+            }else{
+              color == CRGB::Red;
+            }
+          }
           break;
         case RED:
           //lights are red
+          color = CRGB::Red;
           break;
-        case DANGER:
-          //lights are red flashing
+        case GREEN:
+          //lights are green
+          color = CRGB::Green;
           break;
+        case YELLOW:
+          //lights are yellow/orange
+          color = CRGB::Yellow;
+          break;
+        
+        
         default:
           //lights are off
           break;
       }
+      fill_solid(leds, NUM_LED, color);
+      FastLED.show();
     }else{
       //turn off LED
+      FastLED.clear();
     }
     PT_YIELD(pt);
   }
   PT_END(pt);
 }
 
+void reset(){
+  Serial.println("RESETING");
+  delay(1000);
+  digitalWrite(RST_PIN, LOW);
+  delayMicroseconds(3);
+  digitalWrite(RST_PIN, HIGH);
+}
+
+
+
 void setup() {
   Serial.begin(9600);
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LED);
+  FastLED.clear();
   PT_INIT(&ptSonar);
   PT_INIT(&ptButton);
   PT_INIT(&ptStatus);
   PT_INIT(&ptLED);
   pinMode(BUTTON_PIN, INPUT);
-  pinMode(LED_PIN, OUTPUT);
+  pinMode(STATUS_PIN, OUTPUT);
+  digitalWrite(RST_PIN, HIGH);
+  pinMode(RST_PIN, OUTPUT);
   prevTime = millis();
-  savedDistance = EEPROM.read(address);
-  medianDistance = savedDistance+median;
+  flashMillis = millis();
   logger("| Saved Distance (" + String(savedDistance) + ") | Moving RUN");
   runCount++;
   currentState = RUN;
@@ -159,8 +201,6 @@ void loop() {
   PT_SCHEDULE(statusThread(&ptStatus));
   PT_SCHEDULE(ledThread(&ptLED));
   unsigned int d = *pdistance;
-  previousState = currentState;
-  previousRange = currentRange;
   switch(currentState){
     case RUN:
       if(buttonState == HIGH){
@@ -225,12 +265,14 @@ void loop() {
           }else if(avgLearn < min_distance){
             avgLearn = min_distance;
           }
-          EEPROM.update(address, avgLearn);
-          savedDistance = avgLearn;
-          medianDistance = savedDistance + median;
+          if(savedDistance != avgLearn){
+            EEPROM.update(address, avgLearn);
+            logger("| Learned Distance (" + String(savedDistance) + ")");
+            logger("| Reseting");
+            rst = true;
+          }
           avgLearn = 0;
           countLearn = 0;
-          logger("| Learned Distance (" + String(savedDistance) + ")");
           runCount++;
           currentState = RUN;
         }
@@ -298,8 +340,13 @@ void loop() {
     }
     Serial.println(logs);
   }
+  if(rst){
+    reset();
+  }
   prevDistance = d;
   logs = "";
   prevTime = (currentState == IDLE) ? millis() : prevTime;
+  previousState = currentState;
+  previousRange = currentRange;
   delay(1);
 }
